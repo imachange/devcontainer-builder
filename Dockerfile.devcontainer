@@ -1,0 +1,15 @@
+# syntax=docker/dockerfile:1
+#
+# 利用側にコピーして使う Dockerfile (正本)。
+# devcontainer.json の build.dockerfile から相対パスで参照し、build.context は省略する。
+ARG BUILD_BASE_IMAGE
+ARG BUILD_APPLY_IMAGE=ghcr.io/imachange/devcontainer-builder/apply@sha256:REPLACE_WITH_RELEASE_DIGEST
+
+FROM ${BUILD_APPLY_IMAGE:?} AS apply
+FROM ${BUILD_BASE_IMAGE:?} AS runner
+ARG BUILD_USER
+USER root
+RUN --mount=type=bind,from=apply,source=/apply,target=/tmp/apply \
+    --mount=type=bind,target=/tmp/ctx \
+    ["/tmp/apply", "apply", "/tmp/ctx"]
+USER ${BUILD_USER:-root}
