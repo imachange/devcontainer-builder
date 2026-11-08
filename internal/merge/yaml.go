@@ -30,7 +30,8 @@ func sortYAMLKeys(node *yaml.Node) {
 	if node == nil {
 		return
 	}
-	if node.Kind == yaml.MappingNode {
+	switch node.Kind {
+	case yaml.MappingNode:
 		type pair struct {
 			key *yaml.Node
 			val *yaml.Node
@@ -52,7 +53,8 @@ func sortYAMLKeys(node *yaml.Node) {
 			newContent = append(newContent, p.key, p.val)
 		}
 		node.Content = newContent
-	} else if node.Kind == yaml.SequenceNode || node.Kind == yaml.DocumentNode {
+
+	case yaml.SequenceNode, yaml.DocumentNode:
 		for _, child := range node.Content {
 			sortYAMLKeys(child)
 		}
