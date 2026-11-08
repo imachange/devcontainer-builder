@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"text/template"
+
+	"github.com/imachange/devcontainer-builder/internal/merge"
 )
 
 func renderTemplate(srcPath string, vars map[string]string) ([]byte, error) {
@@ -28,14 +30,40 @@ func renderTemplate(srcPath string, vars map[string]string) ([]byte, error) {
 }
 
 func appendToFile(destPath string, data []byte, perm os.FileMode) error {
-	f, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, perm)
-	if err != nil {
+	format, err := merge.DetectFormat(destPath)
+	if err == nil {
+		existing, readErr := os.ReadFile(destPath)
+		if readErr == nil && len(bytes.TrimSpace(existing)) > 0 {
+			merged, mergeErr := merge.Merge(format, existing, data)
+			if mergeErr == nil {
+				return os.WriteFile(destPath, merged, perm)
+			}
+			return mergeErr
+		}
+	}
+
+	existing, err := os.ReadFile(destPath)
+	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	defer f.Close()
 
-	_, err = f.Write(data)
-	return err
+	if len(existing) > 0 {
+		// 冪等性チェック: 既に末尾に同じ内容が追記されている場合はスキップ
+		if bytes.HasSuffix(existing, data) {
+			return nil
+		}
+
+		var buf bytes.Buffer
+		buf.Write(existing)
+		// 改行で終わらない既存の末尾には改行を補正
+		if existing[len(existing)-1] != '\n' {
+			buf.WriteByte('\n')
+		}
+		buf.Write(data)
+		return os.WriteFile(destPath, buf.Bytes(), perm)
+	}
+
+	return os.WriteFile(destPath, data, perm)
 }
 
 func ensureHomeDir(homeDir string) error {

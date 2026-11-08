@@ -1,13 +1,11 @@
 // Package apply は、apply サブコマンドの流れをまとめる。
 //
-// 流れ: 設定の探索と読み込み → target の走査と規約の検査 → 環境の判定 → (実行)。
-// 書き込みの前に検出できるエラーは、すべて、実行の前に出す。
-//
-// 実行 (pre → packages → files → post) は、まだ実装していない。
-// 何かを実行すべき構成なのに、黙って成功することが無いように、明示的に失敗させる。
+// 流れ: 設定の探索と読み込み → target の走査と規約の検査 → 環境の判定 →
+// 安全策検証（上書きチェック） → pre.d 実行 → パッケージ導入 → ファイル配置 → post.d 実行。
 package apply
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -20,6 +18,9 @@ import (
 
 	"github.com/imachange/devcontainer-builder/internal/config"
 	"github.com/imachange/devcontainer-builder/internal/layout"
+	"github.com/imachange/devcontainer-builder/internal/pkgmgr"
+	"github.com/imachange/devcontainer-builder/internal/place"
+	"github.com/imachange/devcontainer-builder/internal/script"
 	"github.com/imachange/devcontainer-builder/internal/sysinfo"
 )
 
@@ -33,17 +34,31 @@ type Options struct {
 	Target  string // --target (コンテキストからの相対パス)
 	Check   bool   // --check (検証だけを行う。root も Linux も要らない)
 	Verbose bool   // -v (INFO の診断も表示する)
+
+	// テスト用フィールド (省略時はルートディレクトリルート "/" およびデフォルト Runner)
+	RootDir string
+	Runner  pkgmgr.Runner
 }
 
 // Run は、ctxDir (ビルドコンテキスト) を対象に、apply を実行する。ログは w に出す。
 func Run(ctxDir string, o Options, w io.Writer) error {
-	if !o.Check {
+	return RunContext(context.Background(), ctxDir, o, w)
+}
+
+// RunContext は、コンテキスト付きで apply 処理を実行する。
+func RunContext(ctx context.Context, ctxDir string, o Options, w io.Writer) error {
+	if !o.Check && o.RootDir == "" {
 		if runtime.GOOS != "linux" {
 			return errors.New("apply runs on Linux only (use --check to validate elsewhere)")
 		}
 		if os.Geteuid() != 0 {
 			return errors.New("apply must run as root (use --check to validate without root)")
 		}
+	}
+
+	rootDir := o.RootDir
+	if rootDir == "" {
+		rootDir = "/"
 	}
 
 	// 入力はすべて、コンテキストの中に閉じ込める (.. や symlink で外に出られない)。
@@ -86,15 +101,107 @@ func Run(ctxDir string, o Options, w io.Writer) error {
 
 	fmt.Fprintf(w, "==> plan: pre=%d packages=%t files=%s post=%d\n",
 		len(lay.Pre), hasPackages, treeList(lay.FileTrees), len(lay.Post))
+
 	if o.Check {
 		return nil
 	}
-	return ErrNotImplemented
+
+	// ----------------------------------------------------
+	// 実行計画の構築とファイル上書き制御 (安全策チェック)
+	// ----------------------------------------------------
+	targetDir := filepath.Join(ctxDir, s.Dir, "target")
+	if o.Target != "" {
+		targetDir = filepath.Join(ctxDir, o.Target)
+	}
+
+	placePlan, err := place.BuildPlan(lay, s, info, targetDir, rootDir)
+	if err != nil {
+		return fmt.Errorf("failed to build file placement plan: %w", err)
+	}
+
+	// 上書き制御のチェック
+	for _, action := range placePlan.Actions {
+		if action.IsDir {
+			continue
+		}
+		fi, err := os.Stat(action.DestPath)
+		if err == nil && fi.Mode().IsRegular() {
+			if !s.Overwrite && (action.Mode == place.ModeCopy || action.Mode == place.ModeTemplate) {
+				return fmt.Errorf("overwriting existing file %s is forbidden (BUILD_OVERWRITE=false)", action.DestPath)
+			}
+			if o.Verbose || s.Overwrite {
+				fmt.Fprintf(w, "[INFO] overwriting existing file: %s\n", action.DestPath)
+			}
+		}
+	}
+
+	// ----------------------------------------------------
+	// Phase 1: pre.d スクリプト実行
+	// ----------------------------------------------------
+	if len(lay.Pre) > 0 {
+		fmt.Fprintln(w, "==> executing pre scripts...")
+		scriptCfg := script.Config{
+			Timeout:   s.ScriptTimeout,
+			BuildArgs: s.Vars,
+			DCBEnv:    infoToMap(info),
+			BaseEnv:   os.Environ(),
+			Stdout:    w,
+			Stderr:    w,
+		}
+		if err := script.RunDir(ctx, filepath.Join(targetDir, "pre.d"), scriptCfg); err != nil {
+			return fmt.Errorf("pre script execution failed: %w", err)
+		}
+	}
+
+	// ----------------------------------------------------
+	// Phase 2: パッケージ導入 (pkgmgr)
+	// ----------------------------------------------------
+	if hasPackages {
+		fmt.Fprintln(w, "==> installing packages...")
+		pkgPlan, err := pkgmgr.BuildPlan(lay, s, info)
+		if err != nil {
+			return fmt.Errorf("failed to build package plan: %w", err)
+		}
+		printDiagnostics(w, pkgPlan.Diags, o.Verbose)
+		if err := pkgmgr.Install(ctx, pkgPlan, o.Runner); err != nil {
+			return fmt.Errorf("package installation failed: %w", err)
+		}
+	}
+
+	// ----------------------------------------------------
+	// Phase 3: ファイル配置 (place)
+	// ----------------------------------------------------
+	if len(lay.FileTrees) > 0 || placePlan.CreateHome {
+		fmt.Fprintln(w, "==> placing files...")
+		if err := place.Execute(ctx, placePlan, s.Vars); err != nil {
+			return fmt.Errorf("file placement failed: %w", err)
+		}
+	}
+
+	// ----------------------------------------------------
+	// Phase 4: post.d スクリプト実行
+	// ----------------------------------------------------
+	if len(lay.Post) > 0 {
+		fmt.Fprintln(w, "==> executing post scripts...")
+		// スクリプト直前にシステム情報を再判定
+		infoPost := sysinfo.System().Detect("post", s.UserCandidates()...)
+		scriptCfgPost := script.Config{
+			Timeout:   s.ScriptTimeout,
+			BuildArgs: s.Vars,
+			DCBEnv:    infoToMap(infoPost),
+			BaseEnv:   os.Environ(),
+			Stdout:    w,
+			Stderr:    w,
+		}
+		if err := script.RunDir(ctx, filepath.Join(targetDir, "post.d"), scriptCfgPost); err != nil {
+			return fmt.Errorf("post script execution failed: %w", err)
+		}
+	}
+
+	fmt.Fprintln(w, "==> apply finished successfully")
+	return nil
 }
 
-// loadLayout は、target ディレクトリを探して、走査する。
-// 既定の場所 (devcontainer.json の隣の target/) が無ければ、空として扱う。
-// --target で明示した場所が無ければ、エラーにする。
 func loadLayout(fsys fs.FS, s *config.Settings, o Options, w io.Writer) (*layout.Layout, error) {
 	explicit := o.Target != ""
 	target := path.Join(s.Dir, "target")
@@ -137,6 +244,17 @@ func printDiagnostics(w io.Writer, diags []config.Diagnostic, verbose bool) {
 		}
 		fmt.Fprintln(w, d)
 	}
+}
+
+func infoToMap(info sysinfo.Info) map[string]string {
+	m := make(map[string]string)
+	for _, kv := range info.Env() {
+		parts := strings.SplitN(kv, "=", 2)
+		if len(parts) == 2 {
+			m[parts[0]] = parts[1]
+		}
+	}
+	return m
 }
 
 func orDash(s string) string {
