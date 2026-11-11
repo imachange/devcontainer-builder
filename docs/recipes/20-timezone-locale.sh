@@ -14,7 +14,7 @@
 #
 # ディストリビューションごとの違い:
 #   apt     locales を導入し、locale-gen を実行する
-#   dnf     glibc-langpack-<言語> を導入する (未提供の言語パックはスキップ)
+#   dnf     glibc-langpack-<言語> を導入する (未提供時は localedef で直接生成)
 #   zypper  glibc-locale を導入する
 #   apk     musl には、glibc のようなロケールの仕組みが無いので、何もしない (タイムゾーンだけ設定する)
 set -eu
@@ -64,11 +64,18 @@ case "${DCB_OS_FAMILY:-}" in
   dnf)
     for l in $locales; do
       lang="${l%%_*}"
-      # UBI 9 Minimal 等で一部の言語パック (glibc-langpack-ja など) がリポジトリに存在しない場合はスキップ
+      # UBI 9 Minimal 等で glibc-langpack-<lang> がリポジトリに存在しない場合は localedef で生成
       if pkg_install "glibc-langpack-$lang" 2>/dev/null; then
         installed=1
       else
-        log "glibc-langpack-$lang is not available in repositories; skipping"
+        log "glibc-langpack-$lang is not available; falling back to localedef"
+        if ! have localedef; then
+          pkg_install glibc-locale-source 2>/dev/null || true
+          installed=1
+        fi
+        if have localedef; then
+          localedef -c -i "$lang" -f UTF-8 "$l" 2>/dev/null || true
+        fi
       fi
     done
     printf 'LANG=%s\n' "$default_lang" >/etc/locale.conf
@@ -90,9 +97,7 @@ esac
 if [ "${DCB_OS_FAMILY:-}" != apk ] && have locale; then
   available="$(locale -a 2>/dev/null || true)"
   for l in $locales; do
-    if ! printf '%s\n' "$available" | grep -qix "$(norm "$l")"; then
-      log "warning: locale was not generated: $l (may not be supported in this base image)"
-    fi
+    printf '%s\n' "$available" | grep -qix "$(norm "$l")" || die "locale was not generated: $l"
   done
   log "locales: $locales (default $default_lang)"
 fi
