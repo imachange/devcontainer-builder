@@ -1,6 +1,6 @@
 module github.com/imachange/devcontainer-builder
 
-go 1.27
+go 1.26
 
 require (
 	github.com/imachange/devcontainer-parser v0.1.0
