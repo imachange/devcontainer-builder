@@ -1,0 +1,94 @@
+# apply イメージを、GHCR に公開する (issue #15)。
+#
+# タグ (v1.2.3) を push すると、テストのあとに、マルチアーキテクチャ (amd64 / arm64) の
+# イメージをビルドして push し、cosign (キーレス) で署名する。
+# 完了後のジョブサマリーに、digest と、Dockerfile.devcontainer に貼る、ARG の行を出す。
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
+
+  publish:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write # GHCR への push
+      id-token: write # cosign のキーレス署名 (OIDC)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute names
+        run: |
+          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}/apply" >> "$GITHUB_ENV"
+          echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push (amd64, arm64)
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: mode=max
+          sbom: true
+          build-args: |
+            VERSION=${{ env.VERSION }}
+          tags: |
+            ${{ env.IMAGE }}:${{ env.VERSION }}
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Sign the image by digest
+        run: cosign sign --yes "${IMAGE}@${{ steps.build.outputs.digest }}"
+
+      - name: Summary
+        run: |
+          {
+            echo "## apply image"
+            echo
+            echo "- image: \`${IMAGE}:${VERSION}\`"
+            echo "- digest: \`${{ steps.build.outputs.digest }}\`"
+            echo
+            echo "Paste this into \`Dockerfile.devcontainer\`:"
+            echo
+            echo '```dockerfile'
+            echo "ARG BUILD_APPLY_IMAGE=${IMAGE}@${{ steps.build.outputs.digest }}"
+            echo '```'
+            echo
+            echo "Verify the signature:"
+            echo
+            echo '```sh'
+            echo "cosign verify ${IMAGE}@${{ steps.build.outputs.digest }} \\"
+            echo "  --certificate-identity-regexp 'https://github.com/${GITHUB_REPOSITORY}/' \\"
+            echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

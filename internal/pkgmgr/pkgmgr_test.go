@@ -74,6 +74,30 @@ func TestParseLine(t *testing.T) {
 	}
 }
 
+func TestParseLineRejectsOptionsAndJunk(t *testing.T) {
+	for _, line := range []string{
+		"-oAPT::Update::Pre-Invoke::=id",
+		"curl;touch",
+		"curl foo",
+		"curl@1.2;touch",
+		"curl@",
+	} {
+		if _, err := ParseLine(line); err == nil {
+			t.Errorf("ParseLine(%q) should reject invalid input", line)
+		}
+	}
+}
+
+func TestValidateChecksEveryPackageFamily(t *testing.T) {
+	lay := &layout.Layout{Packages: map[string][]string{
+		"apt": {"curl"},
+		"dnf": {"-oAPT::Update::Pre-Invoke::=id"},
+	}}
+	if err := Validate(lay, nil); err == nil || !strings.Contains(err.Error(), "invalid package name") {
+		t.Fatalf("want invalid package name error, got %v", err)
+	}
+}
+
 func TestBuildPlanPriority(t *testing.T) {
 	lay := &layout.Layout{
 		Packages: map[string][]string{

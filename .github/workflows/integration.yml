@@ -1,0 +1,183 @@
+# マルチディストリビューションの統合テスト (issue #15)。
+#
+# 実際の Dockerfile.devcontainer を、各ベースイメージの上で、docker build して、
+# RUN の中で、apply が動くことを確かめる。docs/recipes のスクリプトも、実際に実行して検証する。
+#
+# 注意:
+#   - タグは、現行のものに合わせて更新する (Renovate などで)。
+#   - docker buildx の docker-container ドライバは、ローカルの apply:ci を FROM で参照できない。
+#     ここでは、docker ドライバ (既定の docker build) を使う。
+#   - Docker Hub の匿名プルには、回数の制限がある。DOCKERHUB_USERNAME / DOCKERHUB_TOKEN を
+#     シークレットに設定すると、ログインして、制限を避ける。
+name: integration
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integration-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  distros:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: debian-12, base: "debian:12-slim", runner: ubuntu-24.04 }
+          - { name: ubuntu-24.04, base: "ubuntu:24.04", runner: ubuntu-24.04 }
+          - { name: alpine-3.20, base: "alpine:3.20", runner: ubuntu-24.04 }
+          - { name: fedora-41, base: "fedora:41", runner: ubuntu-24.04 }
+          - { name: ubi9-minimal, base: "registry.access.redhat.com/ubi9/ubi-minimal:latest", runner: ubuntu-24.04 }
+          - { name: opensuse-leap-15.6, base: "opensuse/leap:15.6", runner: ubuntu-24.04 }
+          # arm64 のランナー (公開リポジトリでは無料。提供状況は、確認する)
+          - { name: debian-12-arm64, base: "debian:12-slim", runner: ubuntu-24.04-arm }
+          - { name: alpine-3.20-arm64, base: "alpine:3.20", runner: ubuntu-24.04-arm }
+    env:
+      DH_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to Docker Hub (optional)
+        if: env.DH_USER != ''
+        run: echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "$DH_USER" --password-stdin
+
+      - name: Build the apply image
+        run: docker build -t apply:ci .
+
+      - name: Detect the environment on the base image
+        run: |
+          id="$(docker create apply:ci /apply)"
+          docker cp "$id:/apply" "$RUNNER_TEMP/apply"
+          docker rm "$id" > /dev/null
+          docker run --rm -v "$RUNNER_TEMP/apply:/apply:ro" "${{ matrix.base }}" /apply detect | tee "$RUNNER_TEMP/detect.txt"
+          grep -Eq '^DCB_PKGMGR=.+' "$RUNNER_TEMP/detect.txt"
+          grep -Eq '^DCB_OS_FAMILY=.+' "$RUNNER_TEMP/detect.txt"
+
+      - name: Prepare the build context (test context + recipes)
+        run: |
+          ctx="$RUNNER_TEMP/ctx"
+          cp -r test/integration/context "$ctx"
+          cp docs/recipes/_lib.sh docs/recipes/10-create-user.sh "$ctx/target/pre.d/"
+          cp docs/recipes/_lib.sh docs/recipes/20-timezone-locale.sh docs/recipes/30-sudo.sh \
+             docs/recipes/40-download-verified.sh "$ctx/target/post.d/"
+          echo "CTX=$ctx" >> "$GITHUB_ENV"
+
+      - name: Layer 1 - apply on the base image
+        run: |
+          docker build -f Dockerfile.devcontainer \
+            --build-arg BUILD_BASE_IMAGE="${{ matrix.base }}" \
+            --build-arg BUILD_APPLY_IMAGE=apply:ci \
+            -t it:stage1 "$CTX"
+
+      - name: Layer 2 - apply again on top of layer 1 (idempotency)
+        run: |
+          docker build -f Dockerfile.devcontainer \
+            --build-arg BUILD_BASE_IMAGE=it:stage1 \
+            --build-arg BUILD_APPLY_IMAGE=apply:ci \
+            -t it:stage2 "$CTX"
+
+      - name: Verify the result
+        run: |
+          docker run --rm \
+            -v "$PWD/test/integration/verify.sh:/verify.sh:ro" \
+            -v "$PWD/docs/recipes:/recipes:ro" \
+            it:stage2 sh /verify.sh
+
+      - name: USER and ENV of the base image are preserved
+        run: |
+          norm() { case "$1" in ""|0|0:0|root|root:root) echo root ;; *) echo "$1" ;; esac; }
+          base_user="$(docker image inspect -f '{{.Config.User}}' "${{ matrix.base }}")"
+          final_user="$(docker image inspect -f '{{.Config.User}}' it:stage2)"
+          echo "base USER='$base_user' final USER='$final_user'"
+          [ "$(norm "$base_user")" = "$(norm "$final_user")" ]
+
+          env_of() { docker image inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$1" | grep -E '^(LANG|LC_ALL)=' | sort; }
+          [ "$(env_of "${{ matrix.base }}")" = "$(env_of it:stage2)" ]
+
+  non-root-base:
+    # ベースの USER が root でないときも、USER が維持されること (BUILD_USER)。
+    name: non-root base image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the apply image
+        run: docker build -t apply:ci .
+
+      - name: Build a non-root base image
+        run: |
+          mkdir -p "$RUNNER_TEMP/base"
+          cat > "$RUNNER_TEMP/base/Dockerfile" <<'DOCKERFILE'
+          FROM debian:12-slim
+          ENV LANG=C.UTF-8
+          RUN useradd -m app
+          USER app
+          DOCKERFILE
+          docker build -t nonroot-base "$RUNNER_TEMP/base"
+
+      - name: Prepare the build context
+        run: |
+          ctx="$RUNNER_TEMP/ctx"
+          cp -r test/integration/context "$ctx"
+          cp docs/recipes/_lib.sh docs/recipes/10-create-user.sh "$ctx/target/pre.d/"
+          cp docs/recipes/_lib.sh docs/recipes/20-timezone-locale.sh docs/recipes/30-sudo.sh \
+             docs/recipes/40-download-verified.sh "$ctx/target/post.d/"
+          echo "CTX=$ctx" >> "$GITHUB_ENV"
+
+      - name: Apply with BUILD_USER=app
+        run: |
+          docker build -f Dockerfile.devcontainer \
+            --build-arg BUILD_BASE_IMAGE=nonroot-base \
+            --build-arg BUILD_USER=app \
+            --build-arg BUILD_APPLY_IMAGE=apply:ci \
+            -t it:nonroot "$CTX"
+
+      - name: USER and LANG are preserved, files were placed
+        run: |
+          [ "$(docker image inspect -f '{{.Config.User}}' it:nonroot)" = app ]
+          docker image inspect -f '{{range .Config.Env}}{{println .}}{{end}}' it:nonroot | grep -qx 'LANG=C.UTF-8'
+          docker run --rm --user root it:nonroot grep -qx 'env=ci' /etc/dcb-test/app.conf
+
+  forgetting-build-user:
+    # BUILD_USER を渡し忘れると、USER が root に戻る。これは、仕様どおりの挙動であり、
+    # CI の「ベースと結果の USER が一致するか」の検査で、検出できることを確かめる。
+    name: forgetting BUILD_USER is detectable
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the apply image
+        run: docker build -t apply:ci .
+
+      - name: Apply to a non-root base without BUILD_USER
+        run: |
+          mkdir -p "$RUNNER_TEMP/base" "$RUNNER_TEMP/ctx"
+          printf 'FROM debian:12-slim\nRUN useradd -m app\nUSER app\n' > "$RUNNER_TEMP/base/Dockerfile"
+          docker build -t nonroot-base "$RUNNER_TEMP/base"
+          printf '{}\n' > "$RUNNER_TEMP/ctx/devcontainer.json"
+          mkdir -p "$RUNNER_TEMP/ctx/target/post.d"
+          printf '#!/bin/sh\ntrue\n' > "$RUNNER_TEMP/ctx/target/post.d/10-noop.sh"
+          docker build -f Dockerfile.devcontainer \
+            --build-arg BUILD_BASE_IMAGE=nonroot-base \
+            --build-arg BUILD_APPLY_IMAGE=apply:ci \
+            -t it:forgot "$RUNNER_TEMP/ctx"
+
+      - name: The USER check catches it
+        run: |
+          norm() { case "$1" in ""|0|0:0|root|root:root) echo root ;; *) echo "$1" ;; esac; }
+          base_user="$(docker image inspect -f '{{.Config.User}}' nonroot-base)"
+          final_user="$(docker image inspect -f '{{.Config.User}}' it:forgot)"
+          echo "base USER='$base_user' final USER='$final_user'"
+          [ "$(norm "$base_user")" != "$(norm "$final_user")" ]

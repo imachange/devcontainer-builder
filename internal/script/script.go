@@ -36,12 +36,13 @@ var protectedEnvKeys = map[string]bool{
 
 // Config はスクリプト実行時の環境設定。
 type Config struct {
-	Timeout   time.Duration     // 1つのスクリプトあたりのタイムアウト（既定 10分）
-	BuildArgs map[string]string // build.args (BUILD_* 以外)
-	DCBEnv    map[string]string // DCB_* 環境変数
-	BaseEnv   []string          // ベースイメージからの環境変数
-	Stdout    io.Writer
-	Stderr    io.Writer
+	Timeout    time.Duration     // 1つのスクリプトあたりのタイムアウト（既定 10分）
+	BuildArgs  map[string]string // build.args (BUILD_* 以外)
+	DCBEnv     map[string]string // DCB_* 環境変数
+	DCBEnvFunc func() map[string]string
+	BaseEnv    []string // ベースイメージからの環境変数
+	Stdout     io.Writer
+	Stderr     io.Writer
 }
 
 // RunDir は指定ディレクトリ内のスクリプトを名前順に探索し実行する。
@@ -101,6 +102,9 @@ func RunFile(ctx context.Context, scriptPath string, cfg Config) error {
 	if err := os.WriteFile(tmpScriptPath, data, 0o755); err != nil {
 		return fmt.Errorf("failed to write temp script: %w", err)
 	}
+	if err := copyHelpers(filepath.Dir(scriptPath), tmpDir); err != nil {
+		return fmt.Errorf("copy script helpers: %w", err)
+	}
 
 	// 3. タイムアウト設定
 	timeout := cfg.Timeout
@@ -113,6 +117,9 @@ func RunFile(ctx context.Context, scriptPath string, cfg Config) error {
 	cmd := exec.CommandContext(execCtx, tmpScriptPath)
 	cmd.Stdout = cfg.Stdout
 	cmd.Stderr = cfg.Stderr
+	if cfg.DCBEnvFunc != nil {
+		cfg.DCBEnv = cfg.DCBEnvFunc()
+	}
 	cmd.Env = prepareEnv(cfg)
 
 	// プロセスグループを作成し、タイムアウト時に子プロセスごと全滅させる設定 (Unix)
@@ -143,6 +150,31 @@ func RunFile(ctx context.Context, scriptPath string, cfg Config) error {
 		}
 	}
 
+	return nil
+}
+
+func copyHelpers(sourceDir, destDir string) error {
+	entries, err := os.ReadDir(sourceDir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if (!strings.HasPrefix(name, ".") && !strings.HasPrefix(name, "_")) || !entry.Type().IsRegular() {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		data, err := os.ReadFile(filepath.Join(sourceDir, name))
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(destDir, name), data, info.Mode().Perm()); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

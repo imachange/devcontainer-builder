@@ -4,7 +4,7 @@ Dockerfile の `RUN` の中で、**ビルド時だけ**動く Go 製の CLI で�
 
 CI で事前ビルドして GHCR に配信するイメージ（base → python → project → user のように、作成済みのイメージを次のベースにする構成）を想定しています。CLI は最終イメージに残りません。
 
-> **状況**: 設計は [docs/design.md](docs/design.md) にまとまっています。現在の実装は、設定の読み込み、`target/` の規約の検査、環境の判定までで、**実行フェーズ（パッケージ導入、ファイル配置、スクリプト実行）は未実装**です。実行すべき構成で `--check` なしに実行すると、黙って成功せず、`not implemented yet` で失敗します。
+> **状況**: パッケージ導入、ファイル配置、スクリプト実行（pre → パッケージ → ファイル配置 → post）まで実装されています。設計は [docs/design.md](docs/design.md)、実装の点検結果は [docs/audit.md](docs/audit.md) にあります。
 
 ## 仕組み
 
@@ -62,6 +62,33 @@ CI で事前ビルドして GHCR に配信するイメージ（base → python �
 ```
 
 `target/` が無くても動きます（その場合は `build.args` だけが使われます）。実行順は **pre → パッケージ → ファイル配置 → post** です。
+
+## ファイル配置の規則
+
+`files/root/<path>` は `/<path>` へ `root:root` で、`files/home/<path>` は開発ユーザーのホームへ、そのユーザーの所有で置きます。ホームが無ければ、`useradd -m` と同じ結果（`login.defs` の権限、`/etc/skel` の複製）で作ります。
+
+| 拡張子 | 意味 |
+|---|---|
+| なし | 置換（既存があれば、`BUILD_OVERWRITE` が `false` でない限り、上書き。上書きはログに出る） |
+| `.tmpl` | `{{ VAR }}` を展開して置換。未定義の変数はエラー。`{{ .Values.x }}` のような、他のテンプレートの記法は、そのまま残る |
+| `.append` | 追記。配置先が無ければ新規作成。同じ内容が既にあれば、何もしない（冪等）。`.json` / `.toml` / `.yaml` / `.yml` は、キー単位でマージ |
+| `.tmpl.append` | 展開してから追記（`.append.tmpl` でも同じ） |
+
+- 実行順は、ディレクトリ → 置換 → 追記です。`foo.tmpl` と `foo.append` が両方あれば、置換してから追記します。同じ配置先を指すものが複数あればエラーです。
+- 新規作成のときの権限は、規則で決まります: `~/.ssh` は 0700（ファイルは 0600、`*.pub` は 0644）、`~/.gnupg` は 0700 と 0600、`~/.netrc` などは 0600、`/etc/sudoers.d/*` は 0440。それ以外は、ディレクトリ 0755、ファイルは 0644（ソースに実行ビットがあれば 0755）。変えたいときは、`post.d/` で `chmod` します。
+- **既存のファイルへの追記とマージは、権限と所有者を変えません。** 既存のディレクトリにも触りません。
+- 次のものは拒否します: symlink、デバイス、setuid / setgid のソース。`/etc/passwd`、`/etc/shadow`、`/etc/group`、`/etc/sudoers`、`/etc/ld.so.preload`、`/proc`、`/sys`、`/dev`（拡張子を外した配置先と、symlink を解決した実体の、両方で判定します）。配置先が symlink なら、その先へは書き込みません。
+
+## レシピ
+
+スクリプトは、ベースイメージにある言語で、自由に書けます。ディストリビューションごとの違いを、CLI が吸収する代わりに、コピーして使えるスクリプトを [docs/recipes/](docs/recipes/) に置いています。CI で、各ディストリビューション上で、実際に実行して検証しています。
+
+| レシピ | 内容 |
+|---|---|
+| [10-create-user.sh](docs/recipes/10-create-user.sh) | ユーザーを作る（`useradd` / busybox の `adduser`。UBI minimal では `shadow-utils` も導入） |
+| [20-timezone-locale.sh](docs/recipes/20-timezone-locale.sh) | タイムゾーンと、日本語ロケール |
+| [30-sudo.sh](docs/recipes/30-sudo.sh) | sudo の導入と、`/etc/sudoers.d` への、検証付きの配置 |
+| [40-download-verified.sh](docs/recipes/40-download-verified.sh) | チェックサムが必須の、ダウンロードと展開 |
 
 ## build.args
 
@@ -139,10 +166,24 @@ go test ./...
 
 - Go 1.24 以上が必要です（`os.Root` を使います）。
 - apply イメージ: `docker build -t apply:dev .`（`FROM scratch` に静的バイナリ `/apply` を置きます）。
-- 依存は、[devcontainer-parser](https://github.com/imachange/devcontainer-parser) です。`go.mod` の版が存在しない場合は、`go get github.com/imachange/devcontainer-parser@latest` を実行してください。
-- マージ機能の実装時に、`github.com/pelletier/go-toml/v2` と `go.yaml.in/yaml/v4` を追加します。
+- 依存は、[devcontainer-parser](https://github.com/imachange/devcontainer-parser)、`github.com/pelletier/go-toml/v2`、`gopkg.in/yaml.v3` です（YAML は、`go.yaml.in/yaml/v4` への移行を予定しています）。
+- 一部のテストは、root のときに、本当の `chown` の経路を通ります。CI は、root の Docker コンテナの中でも、`go test` を実行します。
+
+### CI
+
+| ワークフロー | 内容 |
+|---|---|
+| [ci.yml](.github/workflows/ci.yml) | gofmt、`go mod tidy`、`go vet`、`go build`、`go test -race`、root での `go test`、`govulncheck`、apply イメージのビルド |
+| [integration.yml](.github/workflows/integration.yml) | Debian、Ubuntu、Alpine、Fedora、UBI minimal、openSUSE（と、arm64）の上で、`Dockerfile.devcontainer` を、実際に `docker build` する。2 回重ねて冪等性を、非 root のベースで `USER` の維持を、確かめる |
+| [release.yml](.github/workflows/release.yml) | タグ（`v*`）で、amd64 / arm64 の apply イメージを GHCR に push し、cosign で署名する |
+
+統合テストは、[test/integration/](test/integration/) の、テスト用のコンテキストと `verify.sh` を使います。
 
 ## 関連
 
 - [devcontainer-parser](https://github.com/imachange/devcontainer-parser): devcontainer.json の解析
 - [devcontainer-bootstrap](https://github.com/imachange/devcontainer-bootstrap): ホスト側の初期化ツール
+
+## ライセンス
+
+[MIT](LICENSE)

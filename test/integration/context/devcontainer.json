@@ -1,0 +1,19 @@
+// 統合テスト用のコンテキスト。CI が、docs/recipes のスクリプトを、pre.d / post.d にコピーしてから使う。
+{
+  "name": "integration",
+  "remoteUser": "dcbuser",
+  "build": {
+    "dockerfile": "../../../Dockerfile.devcontainer",
+    "args": {
+      "APP_ENV": "ci",
+      "TZ_NAME": "Asia/Tokyo",
+      "LOCALES": "ja_JP.UTF-8 en_US.UTF-8",
+      "SUDO_NOPASSWD": "1",
+      "DOWNLOAD_URL": "file:///etc/dcb-test/payload.txt",
+      "DOWNLOAD_SHA256": "1de48200d7f03e94542c9130eef7d2bdbc5eb816d8921c3511b3021ccdab1f1a",
+      "DOWNLOAD_DEST": "/opt/dcb/payload.txt",
+      "DOWNLOAD_ALLOW_FILE": "1",
+      "BUILD_PACKAGES": "git curl ca-certificates"
+    }
+  }
+}

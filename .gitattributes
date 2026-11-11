@@ -1,0 +1,7 @@
+# シェルスクリプトと Dockerfile は、LF に固定する。
+# Windows のチェックアウトで CRLF になると、shebang が "bad interpreter" で失敗する
+# (devcontainer-builder は、CRLF の shebang を検出して、明確なエラーにする)。
+* text=auto
+*.sh text eol=lf
+Dockerfile* text eol=lf
+*.yml text eol=lf

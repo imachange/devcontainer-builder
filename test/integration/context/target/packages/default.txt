@@ -1,0 +1,3 @@
+# 全ディストリビューションに、同じ名前である、小さなパッケージ。
+# build.args の BUILD_PACKAGES (git curl ca-certificates) と、あわせて導入される。
+git

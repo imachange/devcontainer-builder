@@ -1,0 +1,107 @@
+# Go のビルドとテスト (issue #8)。
+# プルリクエストと main への push で実行する。
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod # go.mod の go ディレクティブに合わせる (os.Root には 1.24 以上が必要)
+
+      - name: Download and verify modules
+        run: |
+          go mod download
+          go mod verify
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-formatted (run: gofmt -w .):"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go mod tidy is clean
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go build
+        run: go build ./...
+
+      - name: Cross-build the static binary for arm64
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o /dev/null .
+
+      - name: go test (-race)
+        run: go test -race -count=1 ./...
+
+  test-as-root:
+    # chown や useradd 相当の処理は、root でないと、本当の経路を通らない。
+    # root で動く Docker コンテナの中で、同じテストを実行する。
+    name: test as root
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: go test as root in a container
+        run: |
+          GO_VERSION="$(sed -n 's/^go \([0-9][0-9.]*\)$/\1/p' go.mod)"
+          docker run --rm -v "$PWD:/src" -w /src "golang:${GO_VERSION}" \
+            sh -c 'id -u && go test -count=1 ./...'
+
+  vulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+  apply-image:
+    name: apply image builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the apply image
+        run: docker build -t apply:ci .
+
+      - name: The image contains only the static binary
+        run: |
+          id="$(docker create apply:ci /apply)"
+          docker export "$id" | tar -t | grep -vx '' | sort > /tmp/files.txt
+          docker rm "$id" > /dev/null
+          cat /tmp/files.txt
+          grep -qx 'apply' /tmp/files.txt

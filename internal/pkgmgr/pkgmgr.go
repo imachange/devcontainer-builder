@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -164,6 +165,7 @@ func Install(ctx context.Context, plan *Plan, runner Runner) error {
 }
 
 var varTmplRe = regexp.MustCompile(`\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}`)
+var packagePartRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9+_.:-]*$`)
 
 // ExpandVars は、文字列内の {{ VAR }} を vars の値で展開する。
 func ExpandVars(s string, vars map[string]string) (string, error) {
@@ -198,13 +200,63 @@ func ParseLine(raw string) (Item, error) {
 	}
 	name, ver, hasVer := strings.Cut(raw, "@")
 	name = strings.TrimSpace(name)
-	if name == "" {
-		return Item{}, fmt.Errorf("invalid package specification: %q", raw)
+	if !packagePartRe.MatchString(name) {
+		return Item{}, fmt.Errorf("invalid package name: %q", name)
 	}
 	if hasVer {
 		ver = strings.TrimSpace(ver)
+		if !packagePartRe.MatchString(ver) {
+			return Item{}, fmt.Errorf("invalid package version for %s: %q", name, ver)
+		}
 	}
 	return Item{Name: name, Version: ver}, nil
+}
+
+// Validate は、パッケージマネージャーの実行前に、全系統の指定とテンプレート変数を検証する。
+func Validate(lay *layout.Layout, cfg *config.Settings) error {
+	vars := map[string]string{}
+	if cfg != nil {
+		vars = cfg.Vars
+	}
+	var errs []error
+	validate := func(source string, lines []string) {
+		for i, raw := range lines {
+			expanded, err := ExpandVars(raw, vars)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("%s:%d: %w", source, i+1, err))
+				continue
+			}
+			if _, err := ParseLine(expanded); err != nil {
+				errs = append(errs, fmt.Errorf("%s:%d: %w", source, i+1, err))
+			}
+		}
+	}
+	if lay != nil {
+		families := make([]string, 0, len(lay.Packages))
+		for family := range lay.Packages {
+			families = append(families, family)
+		}
+		sort.Strings(families)
+		for _, family := range families {
+			validate("packages/"+family+".txt", lay.Packages[family])
+		}
+	}
+	if cfg != nil {
+		families := make([]string, 0, len(cfg.Packages))
+		for family := range cfg.Packages {
+			families = append(families, family)
+		}
+		sort.Strings(families)
+		for _, family := range families {
+			lines := cfg.Packages[family]
+			name := "BUILD_PACKAGES"
+			if family != "default" {
+				name += "_" + strings.ToUpper(family)
+			}
+			validate(name, lines)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // BuildPlan は、レイアウト・設定・システム情報から優先順位に従って Plan を構築する。
