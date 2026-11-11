@@ -193,24 +193,25 @@ func TestConfigErrorsAreReported(t *testing.T) {
 	}
 }
 
-// --check なしの apply は、まだ実行フェーズを持たない。何かを実行すべき構成で、黙って成功してはいけない。
-func TestApplyWithoutCheckNeverSucceedsSilently(t *testing.T) {
+// --check なしの apply は、root でなければ、何も実行せずに失敗する。
+// (root で実行すると、実際にスクリプトを実行してしまうので、root のときはテストしない。)
+func TestApplyRequiresRoot(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("apply runs on Linux only")
 	}
+	if os.Geteuid() == 0 {
+		t.Skip("running as root would execute the scripts for real")
+	}
+	marker := filepath.Join(t.TempDir(), "ran")
 	dir := tree(t, map[string]string{
-		"devcontainer.json":     `{}`,
-		"target/post.d/10-a.sh": "#!/bin/sh\n",
+		"devcontainer.json":     `{"build":{"args":{"MARKER":"` + marker + `"}}}`,
+		"target/post.d/10-a.sh": "#!/bin/sh\ntouch \"$MARKER\"\n",
 	})
 	code, _, errb := do("apply", dir)
-	if code != 1 {
-		t.Fatalf("exit code = %d, want 1\n%s", code, errb)
+	if code != 1 || !strings.Contains(errb, "must run as root") {
+		t.Fatalf("code=%d\n%s", code, errb)
 	}
-	if os.Geteuid() == 0 {
-		if !strings.Contains(errb, "not implemented") {
-			t.Errorf("as root, want a not-implemented error:\n%s", errb)
-		}
-	} else if !strings.Contains(errb, "must run as root") {
-		t.Errorf("as non-root, want a root error:\n%s", errb)
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("no script may run without root")
 	}
 }

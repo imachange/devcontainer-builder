@@ -5,11 +5,14 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/imachange/devcontainer-builder/internal/apply"
 	"github.com/imachange/devcontainer-builder/internal/sysinfo"
@@ -19,7 +22,11 @@ import (
 var version = "dev"
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	// SIGINT / SIGTERM を受けたら、実行中のスクリプトとコマンドを止めて、戻る。
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	code := runContext(ctx, os.Args[1:], os.Stdout, os.Stderr)
+	stop()
+	os.Exit(code)
 }
 
 // usageError は、使い方の誤り (終了コード 2)。
@@ -35,7 +42,12 @@ const usageText = `usage:
 exit codes: 0 success, 1 failure, 2 usage error
 `
 
+// run は、runContext に、キャンセルされないコンテキストを渡すのと同じ。
 func run(args []string, stdout, stderr io.Writer) int {
+	return runContext(context.Background(), args, stdout, stderr)
+}
+
+func runContext(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprint(stderr, usageText)
 		return 2
@@ -44,7 +56,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	var err error
 	switch args[0] {
 	case "apply":
-		err = cmdApply(args[1:], stdout, stderr)
+		err = cmdApply(ctx, args[1:], stdout, stderr)
 	case "detect":
 		err = cmdDetect(args[1:], stdout)
 	case "version":
@@ -67,7 +79,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	return 1
 }
 
-func cmdApply(args []string, stdout, stderr io.Writer) error {
+func cmdApply(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("apply", flag.ContinueOnError)
 	flags.SetOutput(io.Discard) // エラーは、usageError として、run が表示する
 	cfg := flags.String("config", os.Getenv("BUILD_CONFIG"), "devcontainer.json, relative to the context")
@@ -86,7 +98,7 @@ func cmdApply(args []string, stdout, stderr io.Writer) error {
 		return &usageError{"apply requires exactly one argument: <context-dir> (flags go before it)"}
 	}
 
-	return apply.Run(flags.Arg(0), apply.Options{
+	return apply.RunContext(ctx, flags.Arg(0), apply.Options{
 		Config:  *cfg,
 		Target:  *target,
 		Check:   *check,

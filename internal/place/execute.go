@@ -2,83 +2,73 @@ package place
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
-	"path/filepath"
 )
 
-// Execute は、計画されたファイル配置・権限設定・ホーム作成を実行する。
+// Execute は、Plan のアクションを、順に実行する。
+//
+// 順序は、ディレクトリ、置換、追記。各ファイルは、書き込みの直前に、配置先の安全を確認する (guardDest)。
+// Plan.CreateHome が true なら、先にホームを作る。Plan.HomePending のままの Plan は、実行できない。
+// vars は、テンプレートの変数。
 func Execute(ctx context.Context, plan *Plan, vars map[string]string) error {
 	if plan == nil {
 		return nil
 	}
-
-	if plan.CreateHome && plan.UserHome != "" {
-		if err := ensureHomeDir(plan.UserHome); err != nil {
-			return fmt.Errorf("failed to create home directory for %s: %w", plan.TargetUser, err)
+	if plan.HomePending {
+		return ErrHomeUnresolved
+	}
+	if plan.CreateHome {
+		if err := ensureHome(plan); err != nil {
+			return fmt.Errorf("failed to create home directory %s: %w", plan.UserHome, err)
 		}
 	}
 
-	for _, action := range plan.Actions {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
+	for _, a := range plan.Actions {
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-
-		if action.IsDir {
-			if err := os.MkdirAll(action.DestPath, action.Perm); err != nil {
-				return fmt.Errorf("failed to create directory %s: %w", action.DestPath, err)
-			}
-			setOwner(action.DestPath, action.UID, action.GID)
-			continue
+		if err := executeAction(plan, a, vars); err != nil {
+			return fmt.Errorf("%s: %w", a.DestPath, err)
 		}
+	}
+	return nil
+}
 
-		parentDir := filepath.Dir(action.DestPath)
-		if err := os.MkdirAll(parentDir, 0755); err != nil {
-			return fmt.Errorf("failed to create parent directory for %s: %w", action.DestPath, err)
-		}
-
-		var content []byte
-		var err error
-
-		switch action.Mode {
-		case ModeCopy:
-			content, err = os.ReadFile(action.SourcePath)
-			if err != nil {
-				return fmt.Errorf("failed to read source %s: %w", action.SourcePath, err)
-			}
-			err = os.WriteFile(action.DestPath, content, action.Perm)
-
-		case ModeTemplate:
-			content, err = renderTemplate(action.SourcePath, vars)
-			if err != nil {
-				return fmt.Errorf("failed to render template %s: %w", action.SourcePath, err)
-			}
-			err = os.WriteFile(action.DestPath, content, action.Perm)
-
-		case ModeAppend:
-			content, err = os.ReadFile(action.SourcePath)
-			if err != nil {
-				return fmt.Errorf("failed to read source %s: %w", action.SourcePath, err)
-			}
-			err = appendToFile(action.DestPath, content, action.Perm)
-
-		case ModeTemplateAppend:
-			content, err = renderTemplate(action.SourcePath, vars)
-			if err != nil {
-				return fmt.Errorf("failed to render template %s: %w", action.SourcePath, err)
-			}
-			err = appendToFile(action.DestPath, content, action.Perm)
-		}
-
-		if err != nil {
-			return fmt.Errorf("failed to write %s: %w", action.DestPath, err)
-		}
-
-		_ = os.Chmod(action.DestPath, action.Perm)
-		setOwner(action.DestPath, action.UID, action.GID)
+func executeAction(plan *Plan, a Action, vars map[string]string) error {
+	if err := guardDest(plan.RootDir, a.DestPath, a.IsDir); err != nil {
+		return err
+	}
+	if a.IsDir {
+		return makeDir(a)
 	}
 
+	content, err := readSource(a, vars)
+	if err != nil {
+		return err
+	}
+	if a.Mode.IsAppend() {
+		return appendTo(plan, a, content)
+	}
+
+	fi, err := os.Lstat(a.DestPath)
+	exists := err == nil
+	switch {
+	case exists && fi.IsDir():
+		return errors.New("destination is a directory")
+	case exists && !plan.Overwrite:
+		return fmt.Errorf("overwriting existing file %s is forbidden (BUILD_OVERWRITE=false)", a.DestPath)
+	case err != nil && !errors.Is(err, fs.ErrNotExist):
+		return err
+	}
+
+	if err := writeAtomic(a.DestPath, content, a.Perm, a.UID, a.GID); err != nil {
+		return err
+	}
+	if exists {
+		plan.logf("[INFO] replaced existing file: %s\n", a.DestPath)
+	}
 	return nil
 }

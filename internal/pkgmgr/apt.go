@@ -33,8 +33,8 @@ func (m *AptManager) InstallSpec(pkgs []string) CommandSpec {
 // PostInstallCleanSpec は、apt-get clean の仕様を返す。
 func (m *AptManager) PostInstallCleanSpec() *CommandSpec {
 	return &CommandSpec{
-		Cmd:  "apt-get",
-		Args: []string{"clean"},
+		Cmd:  "sh",
+		Args: []string{"-c", "apt-get clean && rm -rf /var/lib/apt/lists/*"},
 		Env:  []string{"DEBIAN_FRONTEND=noninteractive"},
 	}
 }

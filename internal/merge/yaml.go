@@ -1,14 +1,23 @@
 package merge
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 
 	"gopkg.in/yaml.v3"
 )
 
 func unmarshalYAML(data []byte) (map[string]any, error) {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
 	var raw map[string]any
-	if err := yaml.Unmarshal(data, &raw); err != nil {
+	if err := dec.Decode(&raw); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidSyntax, err)
+	}
+	var extra any
+	if err := dec.Decode(&extra); err == nil {
+		return nil, fmt.Errorf("%w: multiple YAML documents", ErrInvalidSyntax)
+	} else if err != io.EOF {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidSyntax, err)
 	}
 	if raw == nil {
