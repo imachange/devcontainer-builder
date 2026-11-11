@@ -41,3 +41,22 @@ pkg_clean() {
     *) : ;;
   esac
 }
+
+download_file() {
+    local url="$1"
+    local dest="$2"
+
+    case "$url" in
+        file://*)
+            # file:// スキームの場合はパスを取り出して cp で直接コピー
+            cp "${url#file://}" "$dest"
+            ;;
+        *)
+            if command -v curl >/dev/null 2>&1; then
+                curl -fsSL "$url" -o "$dest"
+            else
+                wget -O "$dest" "$url"
+            fi
+            ;;
+    esac
+}

@@ -39,21 +39,30 @@ if [ "${DOWNLOAD_EXTRACT:-}" != 1 ] && [ -f "$dest" ] && [ "$(sha_of "$dest")" =
   exit 0
 fi
 
-if ! have curl && ! have wget; then
-  case "${DCB_OS_FAMILY:-}" in
-    apt | dnf | zypper | apk) pkg_install curl ca-certificates ;;
-    *) die "neither curl nor wget is available" ;;
-  esac
-  pkg_clean
-fi
-
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
-if have curl; then
-  curl -fsSL --retry 3 --proto '=https,file' -o "$tmp" "$url"
-else
-  wget -q -O "$tmp" "$url"
-fi
+
+case "$url" in
+  file://*)
+    # テスト用の file:// スキームは wget / curl を使わず直接コピー
+    cp "${url#file://}" "$tmp"
+    ;;
+  *)
+    if ! have curl && ! have wget; then
+      case "${DCB_OS_FAMILY:-}" in
+        apt | dnf | zypper | apk) pkg_install curl ca-certificates ;;
+        *) die "neither curl nor wget is available" ;;
+      esac
+      pkg_clean
+    fi
+
+    if have curl; then
+      curl -fsSL --retry 3 --proto '=https' -o "$tmp" "$url"
+    else
+      wget -q -O "$tmp" "$url"
+    fi
+    ;;
+esac
 
 actual="$(sha_of "$tmp")"
 [ "$actual" = "$sha" ] || die "checksum mismatch for $url: expected $sha, got $actual"
