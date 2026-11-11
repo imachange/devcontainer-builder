@@ -1,6 +1,6 @@
 # apply イメージ (FROM scratch に静的バイナリ /apply だけを置く)。
 # 利用側の Dockerfile.devcontainer が、このイメージを digest で参照する。
-FROM --platform=$BUILDPLATFORM golang:1.24 AS build
+FROM --platform=$BUILDPLATFORM golang:1.27 AS build
 ARG TARGETOS TARGETARCH VERSION=dev
 WORKDIR /src
 COPY go.mod go.sum ./
