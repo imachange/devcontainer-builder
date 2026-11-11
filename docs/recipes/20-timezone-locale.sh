@@ -70,36 +70,4 @@ case "${DCB_OS_FAMILY:-}" in
       else
         log "glibc-langpack-$lang is not available; falling back to localedef"
         if ! have localedef; then
-          pkg_install glibc-locale-source 2>/dev/null || true
-          installed=1
-        fi
-        if have localedef; then
-          localedef -c -i "$lang" -f UTF-8 "$l" 2>/dev/null || true
-        fi
-      fi
-    done
-    printf 'LANG=%s\n' "$default_lang" >/etc/locale.conf
-    ;;
-  zypper)
-    pkg_install glibc-locale
-    installed=1
-    printf 'LANG=%s\n' "$default_lang" >/etc/locale.conf
-    ;;
-  apk)
-    log "musl has no locale database; skipping locales (set LANG=C.UTF-8 in the base image if you need UTF-8)"
-    ;;
-  *)
-    log "unknown distribution family; skipping locales"
-    ;;
-esac
-
-# ---- 確認 (glibc 系だけ)
-if [ "${DCB_OS_FAMILY:-}" != apk ] && have locale; then
-  available="$(locale -a 2>/dev/null || true)"
-  for l in $locales; do
-    printf '%s\n' "$available" | grep -qix "$(norm "$l")" || die "locale was not generated: $l"
-  done
-  log "locales: $locales (default $default_lang)"
-fi
-
-[ "$installed" -eq 0 ] || pkg_clean
+          pkg_install glibc-locale-source 2>/dev
