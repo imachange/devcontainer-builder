@@ -26,10 +26,11 @@ func (m *DnfManager) PreInstallSpec() *CommandSpec {
 // InstallSpec は、dnf/yum/microdnf install の仕様を返す。
 func (m *DnfManager) InstallSpec(pkgs []string) CommandSpec {
 	// microdnf は --allowerasing を非サポートのため、
-	// プリインストールの curl-minimal との競合を rpm レベルで解除してから実行する
+	// プリインストールの curl-minimal / libcurl-minimal との競合を
+	// RPM DB レベルで解除 (--justdb) してから microdnf install を実行する
 	if m.Cmd == "microdnf" {
 		cmdStr := fmt.Sprintf(
-			"if rpm -q curl-minimal >/dev/null 2>&1; then rpm -e --nodeps curl-minimal 2>/dev/null || true; fi && microdnf install -y %s",
+			"if rpm -q curl-minimal >/dev/null 2>&1; then rpm -e --nodeps --justdb curl-minimal libcurl-minimal 2>/dev/null || true; fi && microdnf install -y %s",
 			strings.Join(pkgs, " "),
 		)
 		return CommandSpec{
