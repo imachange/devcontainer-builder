@@ -20,7 +20,7 @@ func (m *DnfManager) PreInstallSpec() *CommandSpec {
 
 // InstallSpec は、dnf/yum install の仕様を返す。
 func (m *DnfManager) InstallSpec(pkgs []string) CommandSpec {
-	args := append([]string{"install", "-y"}, pkgs...)
+	args := append([]string{"install", "-y", "--allowerasing"}, pkgs...)
 	return CommandSpec{
 		Cmd:  m.Cmd,
 		Args: args,
