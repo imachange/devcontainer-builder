@@ -13,7 +13,7 @@
       "DOWNLOAD_SHA256": "1de48200d7f03e94542c9130eef7d2bdbc5eb816d8921c3511b3021ccdab1f1a",
       "DOWNLOAD_DEST": "/opt/dcb/payload.txt",
       "DOWNLOAD_ALLOW_FILE": "1",
-      "BUILD_PACKAGES": "git curl ca-certificates"
+      "BUILD_PACKAGES": "git ca-certificates"
     }
   }
 }

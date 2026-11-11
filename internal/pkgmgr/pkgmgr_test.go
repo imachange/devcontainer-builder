@@ -210,7 +210,7 @@ func TestExecutorWithRetry(t *testing.T) {
 		"apt-get update",
 		"apt-get install -y --no-install-recommends git=2.0 curl",
 		"apt-get install -y --no-install-recommends git=2.0 curl",
-		"apt-get clean",
+		"sh -c apt-get clean && rm -rf /var/lib/apt/lists/*",
 	}
 	if !reflect.DeepEqual(runner.Calls, wantCalls) {
 		t.Errorf("Calls = %v, want %v", runner.Calls, wantCalls)
